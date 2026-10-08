@@ -1,0 +1,7 @@
+out/
+harness/
+bench/
+*.run.cmd.jsonl
+*.setup.cmd.jsonl
+.DS_Store
+out-test/
