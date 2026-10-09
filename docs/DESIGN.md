@@ -49,6 +49,20 @@ on one `FileChannel.force(false)` (group commit), then publishes the
 `fsync` or `F_FULLFSYNC`; orderer-rust and orderer-cpp always use
 `F_FULLFSYNC`, so durable rows from macOS are not strictly comparable.
 
+## Garbage collection
+
+Each event is one small `Event` record (matcher-java's API), so the young
+generation churns; that is cheap. The expensive part in `orderbench` is
+the benchmark's own corpus: 10M commands are about 1.5 GB of live records,
+which every old-generation collection must trace. With a 6 GB heap that
+showed up as 95–216 ms p99.9 in pipeline rows. The bench now runs with
+`-Xms8g -Xmx8g -Xmn2g` and calls `System.gc()` before each measured pass,
+as the Go and TypeScript benches collect garbage first: W6 durable at P=4
+went from 9.2M to 14.1M ops/s and p99.9 to 21–48 ms. ParallelGC measured
+best; G1 (5 ms pause goal) and ZGC were both slower and had worse tails on
+this workload. A deployment that doesn't hold a corpus in memory has a far
+smaller live set.
+
 ## Harness tools
 
 `scripts/build-harness.sh` writes shell wrappers into `harness/bin/`. The

@@ -25,4 +25,7 @@ tool orderrun OrderRun "$QUICK"
 tool ordererfuzz OrdererFuzz "$QUICK"
 tool orderrecover OrderRecover "$QUICK"
 tool ordersnap OrderSnap "$QUICK"
-tool orderbench OrderBench "-XX:+UseParallelGC -Xms2g -Xmx6g -XX:+AlwaysPreTouch"
+# The bench holds its whole corpus live (10M commands ≈ 1.5 GB): a large heap
+# and young generation keep collections short; OrderBench also runs System.gc()
+# before each measured pass. ParallelGC measured best here (vs G1, ZGC).
+tool orderbench OrderBench "-XX:+UseParallelGC -Xms8g -Xmx8g -Xmn2g -XX:+AlwaysPreTouch"

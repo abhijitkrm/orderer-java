@@ -71,6 +71,7 @@ public final class OrderBench {
         {  // timed per op (matcher protocol)
             Target t = make(setup, sink);
             applyAll(t, setup, setup.cmds.length);
+            System.gc();
             r.lat = new long[run.cmds.length];
             long wall = System.nanoTime();
             for (int i = 0; i < run.cmds.length; i++) {
@@ -83,6 +84,7 @@ public final class OrderBench {
         {  // untimed: the scaling gate's denominator (spec/BENCH.md 1.1)
             Target t = make(setup, sink);
             applyAll(t, setup, setup.cmds.length);
+            System.gc();
             long a0 = threadAlloc();
             long wall = System.nanoTime();
             applyAll(t, run, run.cmds.length);
@@ -125,6 +127,7 @@ public final class OrderBench {
         Pipeline<C> p = build(f, setup.book, o, m.factory());
         p.publishBatch(setup.syms, setup.cmds);
         p.drain();
+        System.gc();  // the corpus is live for the whole run: start the timed pass from a collected heap
         List<long[]> ssyms = new ArrayList<>();
         List<Command[]> scmds = new ArrayList<>();
         int[] counts = new int[o.producers];
