@@ -7,6 +7,8 @@
 - `Journal.repairDir` / `orderrecover --repair` truncate a torn final record.
 - `Pipeline.checkpoint()` rotates journals onto segments at a clean cut,
   writes the snapshot durably and removes covered segments.
+- `Builder.checkpointEvery(nanos)`: automatic checkpoints from a background
+  thread (stopped first at shutdown).
 - `orderrun --checkpoint-every K` and `--durable`; `scripts/test.sh` runs the
   vendored `spec/conformance.sh`.
 

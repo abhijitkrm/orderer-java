@@ -489,6 +489,37 @@ public final class PipelineTest {
         check(total == 1200, "800 checkpointed away");
     }
 
+    static void automaticCheckpointsKeepTheDirectoryRecoverable() {
+        T.Cmds cmds = T.fuzzCorpus(15, 20000, 8);
+        Path dir = T.scratch(SCRATCH, "ckpt-auto");
+        Snapshot last;
+        try (var p = Pipeline.builder().bookConfig(CFG).partitions(3).journal(jcfg(dir, Format.Binary))
+                .checkpointEvery(20_000_000).build()) {
+            long[] sy = cmds.symArray();
+            Command[] cm = cmds.cmdArray();
+            Pipeline.Handle h = p.handle();
+            for (int i = 0; i < cm.length; i += 500) {
+                h.publishBatch(sy, cm, i, Math.min(500, cm.length - i));
+                T.sleep(3);
+            }
+            h.close();
+            last = p.snapshot();
+        }
+        List<Journal.Checkpoint> cps = Journal.listCheckpoints(dir);
+        check(cps.size() == 1 && cps.get(0).cut() > 0, "one automatic checkpoint remains");
+        PartitionMap m = new PartitionMap(3);
+        var rec = Recover.recover(Core.FifoCore::new, CFG, m, Recover.readSnapshot(cps.get(0).path()),
+                new Recover.JournalSource(dir, Format.Binary), (q, s, seq, e) -> {});
+        check(rec.lastIseq() == cmds.size());
+        try (var p2 = Pipeline.builder().bookConfig(rec.book()).partitionMap(m).initial(rec.toInitial()).build()) {
+            check(p2.snapshot().body().equals(last.body()), "the directory recovers the final state");
+        }
+        boolean threw = false;
+        try { Pipeline.builder().checkpointEvery(5_000_000).build(); }
+        catch (PipelineError e) { threw = e.kind == PipelineError.Kind.Config; }
+        check(threw, "needs journals");
+    }
+
     public static void main(String[] args) {
         if (args.length > 0) SCRATCH = Path.of(args[0]);
         T.runAll(new Object[][] {
@@ -512,6 +543,7 @@ public final class PipelineTest {
             {"repair_cuts_only_a_torn_tail", (T.Body) PipelineTest::repairCutsOnlyATornTail},
             {"checkpoints_rotate_segments_and_bound_recovery", (T.Body) PipelineTest::checkpointsRotateSegmentsAndBoundRecovery},
             {"append_continues_the_last_segment_after_a_checkpoint", (T.Body) PipelineTest::appendContinuesTheLastSegmentAfterACheckpoint},
+            {"automatic_checkpoints_keep_the_directory_recoverable", (T.Body) PipelineTest::automaticCheckpointsKeepTheDirectoryRecoverable},
         });
     }
 }

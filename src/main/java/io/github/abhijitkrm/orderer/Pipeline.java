@@ -207,6 +207,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         private boolean timestamps;
         private int egressThreads = 1;
         private Initial<C> initial;
+        private long checkpointEvery;
 
         Builder(Core.Factory<C> f) { factory = f; }
         public Builder<C> bookConfig(Config c) { book = c; return this; }
@@ -222,6 +223,10 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         /// Threads running the partitions' egress plugs (partition p → p % n).
         public Builder<C> egressThreads(int n) { egressThreads = Math.max(n, 1); return this; }
         public Builder<C> initial(Initial<C> i) { initial = i; return this; }
+        /// Take a checkpoint (spec/JOURNAL.md §6) every `intervalNanos` from a
+        /// background thread. Needs journals; shutdown stops the thread first;
+        /// a failed checkpoint fails the pipeline.
+        public Builder<C> checkpointEvery(long intervalNanos) { checkpointEvery = intervalNanos; return this; }
         public Pipeline<C> build() { return new Pipeline<>(this); }
     }
 
@@ -236,6 +241,9 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
     private final Handle handle;
     private final MultiProducer<CmdMsg> ingress;
     private boolean shut;
+    private Thread checkpointer;
+    private final Object ckptLock = new Object();
+    private boolean ckptStop;
 
     public Handle handle() { return new Handle(ingress, sh); }
     public Status publish(long s, Command c) { return handle.publish(s, c); }
@@ -310,6 +318,12 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
     public void shutdown() {
         if (shut) { sh.check(); return; }
         shut = true;
+        if (checkpointer != null) {  // a checkpoint in progress finishes first
+            synchronized (ckptLock) { ckptStop = true; ckptLock.notifyAll(); }
+            for (;;) {
+                try { checkpointer.join(); break; } catch (InterruptedException ignored) {}
+            }
+        }
         sh.closed = true;
         List<InFlight> flags = new ArrayList<>(sh.handles);
         try {
@@ -382,6 +396,8 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
     private static boolean pow2(int n) { return n >= 2 && Integer.bitCount(n) == 1; }
 
     private Pipeline(Builder<C> b) {
+        if (b.checkpointEvery > 0 && b.journal == null)
+            throw new PipelineError(PipelineError.Kind.Config, "checkpointEvery needs journals");
         PartitionMap m;
         try { m = b.map != null ? b.map : new PartitionMap(b.partitions); }
         catch (Routing.RoutingError e) { throw new PipelineError(PipelineError.Kind.Config, e.getMessage()); }
@@ -483,6 +499,31 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         threads.add(thread("orderer-router", () -> guarded(sh, "router", () -> routerLoop(rcons, inboxes, map, ni))));
         handle = new Handle(ingress, sh);
         for (Thread t : threads) t.start();
+        if (b.checkpointEvery > 0) {
+            long interval = b.checkpointEvery;
+            checkpointer = thread("orderer-checkpoint", () -> {
+                for (;;) {
+                    synchronized (ckptLock) {
+                        long deadline = System.nanoTime() + interval;
+                        for (long left = interval; !ckptStop && left > 0; left = deadline - System.nanoTime()) {
+                            try { ckptLock.wait(Math.max(left / 1_000_000, 1)); } catch (InterruptedException ignored) {}
+                        }
+                        if (ckptStop || sh.failed) return;
+                    }
+                    try {
+                        checkpoint();
+                    } catch (PipelineError e) {
+                        if (e.kind != PipelineError.Kind.Closed && e.kind != PipelineError.Kind.Failed)
+                            sh.fail("checkpoint: " + e.getMessage());
+                        return;
+                    } catch (RuntimeException e) {
+                        sh.fail("checkpoint: " + e);
+                        return;
+                    }
+                }
+            });
+            checkpointer.start();
+        }
     }
 
     private static Thread thread(String name, Runnable r) {
