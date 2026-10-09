@@ -10,8 +10,8 @@ matcher's spec and corpus.
 
 - **upstream**: `orderer`
 - **repo**: `https://github.com/abhijitkrm/orderer`
-- **commit**: `21bf70c8880e08226d978cacb531522fa7a03b68`
-- **tag**: `orderer-spec/1.2` (draft)
+- **commit**: `6a46583cf1fc3aee1e5c2c935143b14d8d716067`
+- **tag**: `orderer-spec/1.2`, plus matcher `06b5403` (bench docs only)
 - **paths**: `spec=spec vectors=vectors`
 
 `docs/VENDORED.sha256` holds every file's checksum. `scripts/vendored.sh`
@@ -21,14 +21,14 @@ against the pinned commit.
 ## 2. The matching core
 
 `src/main/java/io/github/abhijitkrm/matcher/` is [matcher-java](https://github.com/abhijitkrm/matcher-java)'s
-package of the same name at `56455ebc30c8e45634a2b62b369739a729418d57`, byte for byte. matcher-java
+package of the same name at `20e563bc0186c6d52b2dbce64d4efce3fd244f3f`, byte for byte, which includes the ladder rescan fix (20e563b). matcher-java
 never had the OrderMap deletion bug fixed upstream in matcher-rust and
 matcher-cpp; `vectors/regress/001_dense_map_churn` pins that.
 
 To check it:
 
 ```bash
-git -C ../matcher-java diff --stat 56455ebc30c8e45634a2b62b369739a729418d57 -- src/main/java/io/github/abhijitkrm/matcher \
+git -C ../matcher-java diff --stat 20e563bc0186c6d52b2dbce64d4efce3fd244f3f -- src/main/java/io/github/abhijitkrm/matcher \
   && diff -r ../matcher-java/src/main/java/io/github/abhijitkrm/matcher src/main/java/io/github/abhijitkrm/matcher
 ```
 

@@ -61,7 +61,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: abhijitkrm/matcher-java
-          ref: 56455ebc30c8e45634a2b62b369739a729418d57
+          ref: 20e563bc0186c6d52b2dbce64d4efce3fd244f3f
           path: upstream/matcher-java
       - uses: dtolnay/rust-toolchain@stable
       - run: upstream/orderer/scripts/diffuzz.sh 4 10000

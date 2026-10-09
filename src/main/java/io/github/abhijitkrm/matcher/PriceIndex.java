@@ -63,6 +63,7 @@ public final class PriceIndex {
         final long base;
         final Level[] levels;
         final long[] bits;
+        final long[] summary; // bit w set iff bits[w] != 0: 4096 ticks per word
         int best = NIL;
         int count = 0;
 
@@ -73,6 +74,7 @@ public final class PriceIndex {
             levels = new Level[span];
             for (int i = 0; i < span; i++) levels[i] = new Level();
             bits = new long[(span + 63) >> 6];
+            summary = new long[(bits.length + 63) >> 6];
         }
 
         private int idx(long p) { return (int) (p - base); }
@@ -91,6 +93,7 @@ public final class PriceIndex {
             Level l = levels[i];
             if (l.empty()) {
                 bits[i >> 6] |= 1L << (i & 63);
+                summary[i >> 12] |= 1L << ((i >> 6) & 63);
                 count++;
                 if (best == NIL || (side == Side.Ask ? i < best : i > best)) best = i;
             }
@@ -100,37 +103,44 @@ public final class PriceIndex {
         public void unlinkLevel(long p) {
             int i = idx(p);
             if (i < 0 || i >= levels.length || !levels[i].empty()) return;
-            bits[i >> 6] &= ~(1L << (i & 63));
+            int w = i >> 6;
+            bits[w] &= ~(1L << (i & 63));
+            if (bits[w] == 0) summary[w >> 6] &= ~(1L << (w & 63));
             count--;
-            if (i == best) best = rescan(i);
+            if (count == 0) best = NIL;
+            else if (i == best) best = rescan(i);
         }
 
         /// Nearest non-empty level strictly beyond `from`; NIL if emptied.
+        /// Searches `from`'s word, then finds the next non-empty word through
+        /// the summary.
         private int rescan(int from) {
-            int n = levels.length;
+            int w = from >> 6;
             if (side == Side.Ask) {
-                for (int w = from >> 6; w < bits.length; w++) {
-                    long word = bits[w];
-                    if (w == from >> 6) {
-                        int b = (from & 63) + 1;
-                        word &= b == 64 ? 0L : ~0L << b;
+                int b = (from & 63) + 1;
+                long word = bits[w] & (b == 64 ? 0L : ~0L << b);
+                if (word != 0) return (w << 6) + Long.numberOfTrailingZeros(word);
+                for (int s = w + 1; s < bits.length; ) {
+                    int sw = s >> 6;
+                    long sword = summary[sw] & (~0L << (s & 63));
+                    if (sword != 0) {
+                        int nw = (sw << 6) + Long.numberOfTrailingZeros(sword);
+                        return (nw << 6) + Long.numberOfTrailingZeros(bits[nw]);
                     }
-                    if (word != 0) {
-                        int i = (w << 6) + Long.numberOfTrailingZeros(word);
-                        return i < n ? i : NIL;
-                    }
+                    s = (sw << 6) + 64;
                 }
             } else {
-                for (int w = from >> 6; w >= 0; w--) {
-                    long word = bits[w];
-                    if (w == from >> 6) {
-                        int b = from & 63;
-                        word &= b == 0 ? 0L : ~0L >>> (64 - b);
+                int b = from & 63;
+                long word = bits[w] & (b == 0 ? 0L : ~0L >>> (64 - b));
+                if (word != 0) return (w << 6) + (63 - Long.numberOfLeadingZeros(word));
+                for (int s = w - 1; s >= 0; ) {
+                    int sw = s >> 6;
+                    long sword = summary[sw] & (~0L >>> (63 - (s & 63)));
+                    if (sword != 0) {
+                        int nw = (sw << 6) + (63 - Long.numberOfLeadingZeros(sword));
+                        return (nw << 6) + (63 - Long.numberOfLeadingZeros(bits[nw]));
                     }
-                    if (word != 0) {
-                        int i = (w << 6) + (63 - Long.numberOfLeadingZeros(word));
-                        return i < n ? i : NIL;
-                    }
+                    s = (sw << 6) - 1;
                 }
             }
             return NIL;
