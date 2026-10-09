@@ -552,7 +552,15 @@ public final class Journal {
         private final Thread io;
         private final StringBuilder scratch = new StringBuilder(256);
 
+        private Stats.IoStats ioStats = new Stats.IoStats();
+
         public ChunkWriter(FileChannel ch, FsyncPolicy fsync, AtomicLong flushed, AtomicLong durable, String name) {
+            this(ch, fsync, flushed, durable, name, new Stats.IoStats());
+        }
+
+        public ChunkWriter(FileChannel ch, FsyncPolicy fsync, AtomicLong flushed, AtomicLong durable, String name,
+                           Stats.IoStats ioStats) {
+            this.ioStats = ioStats;
             this.ch = ch;
             this.fsync = fsync;
             this.flushed = flushed;
@@ -634,7 +642,12 @@ public final class Journal {
 
         private void sync(long written) {
             if (error == null) {
-                try { ch.force(false); durable.set(written); }
+                try {
+                    long t0 = System.nanoTime();
+                    ch.force(false);
+                    ioStats.record(System.nanoTime() - t0);
+                    durable.set(written);
+                }
                 catch (IOException e) { error = "journal fsync: " + e.getMessage(); }
             }
         }

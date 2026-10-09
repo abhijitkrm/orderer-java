@@ -520,6 +520,32 @@ public final class PipelineTest {
         check(threw, "needs journals");
     }
 
+    static void statsCountCommandsEventsAndFsyncs() {
+        T.Cmds cmds = T.fuzzCorpus(16, 5000, 6);
+        Path dir = T.scratch(SCRATCH, "stats");
+        try (var p = Pipeline.builder().bookConfig(CFG).partitions(3).journal(jcfg(dir, Format.Binary)).build()) {
+            p.publishBatch(cmds.symArray(), cmds.cmdArray());
+            p.drain();
+            long deadline = System.nanoTime() + 10_000_000_000L;
+            while (p.stats().partitions().stream().anyMatch(s -> s.durableIseq() < s.flushedIseq()) && System.nanoTime() < deadline)
+                T.sleep(5);
+            Stats.PipelineStats st = p.stats();
+            check(st.ingressDepth() == 0 && st.partitions().size() == 3);
+            long commands = 0, events = 0, durable = 0;
+            for (Stats.PartitionStats s : st.partitions()) {
+                check(s.inboxDepth() == 0 && s.outboxDepth() == 0);
+                check(s.fsyncs() > 0 && s.fsyncNsMax() > 0, "fsyncs on partition ", s.partition());
+                commands += s.commands();
+                events += s.events();
+                durable = Math.max(durable, s.durableIseq());
+            }
+            check(commands == cmds.size() && events == T.referenceLines(CFG, cmds).size() && durable == cmds.size());
+            String prom = st.toPrometheus();
+            check(prom.contains("# TYPE orderer_commands_total counter"));
+            check(prom.contains("orderer_inbox_depth{partition=\"2\"} 0"));
+        }
+    }
+
     public static void main(String[] args) {
         if (args.length > 0) SCRATCH = Path.of(args[0]);
         T.runAll(new Object[][] {
@@ -543,6 +569,7 @@ public final class PipelineTest {
             {"repair_cuts_only_a_torn_tail", (T.Body) PipelineTest::repairCutsOnlyATornTail},
             {"checkpoints_rotate_segments_and_bound_recovery", (T.Body) PipelineTest::checkpointsRotateSegmentsAndBoundRecovery},
             {"append_continues_the_last_segment_after_a_checkpoint", (T.Body) PipelineTest::appendContinuesTheLastSegmentAfterACheckpoint},
+            {"stats_count_commands_events_and_fsyncs", (T.Body) PipelineTest::statsCountCommandsEventsAndFsyncs},
             {"automatic_checkpoints_keep_the_directory_recoverable", (T.Body) PipelineTest::automaticCheckpointsKeepTheDirectoryRecoverable},
         });
     }

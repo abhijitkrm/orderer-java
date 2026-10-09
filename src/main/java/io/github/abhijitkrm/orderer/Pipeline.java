@@ -100,6 +100,11 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         final List<AtomicLong> flushed = new ArrayList<>(), durable = new ArrayList<>();
         final CopyOnWriteArrayList<Runnable> alerts = new CopyOnWriteArrayList<>();
         Journal.Config2 journal;
+        final List<Stats.EngineCounters> counters = new ArrayList<>();
+        final List<Stats.IoStats> io = new ArrayList<>();
+        RingControl<CmdMsg> ingressCtl;
+        final List<RingControl<CmdMsg>> inboxCtl = new ArrayList<>();
+        final List<RingControl<EvtMsg>> outboxCtl = new ArrayList<>();
 
         void alertAll() { for (Runnable a : alerts) a.run(); }
         void fail(String m) {
@@ -254,6 +259,22 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
     public Config bookConfig() { return sh.book; }
     public void setTimestamps(boolean on) { sh.timestamps = on; }
     public long durableIseq(int p) { return sh.durable.get(p).get(); }
+
+    /// Operational statistics (see Stats).
+    public Stats.PipelineStats stats() {
+        List<Stats.PartitionStats> ps = new ArrayList<>();
+        for (int p = 0; p < sh.partitions; p++) {
+            Stats.EngineCounters c = sh.counters.get(p);
+            Stats.IoStats io = sh.io.get(p);
+            ps.add(new Stats.PartitionStats(p, depth(sh.inboxCtl.get(p).published(), sh.inboxCtl.get(p).consumed()),
+                    depth(sh.outboxCtl.get(p).published(), sh.outboxCtl.get(p).consumed()), c.commands, c.events,
+                    sh.journal != null ? sh.flushed.get(p).get() : -1L, sh.durable.get(p).get(),
+                    io.fsyncs.get(), io.fsyncNsTotal.get(), io.fsyncNsMax.get()));
+        }
+        return new Stats.PipelineStats(depth(sh.ingressCtl.published(), sh.ingressCtl.consumed()), ps);
+    }
+
+    private static long depth(long published, long consumed) { return Math.max(published - consumed, 0); }
 
     /// Barrier: returns once every command published before the call has been
     /// applied and delivered to every egress plug.
@@ -427,6 +448,8 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
             sh.egressEpoch[p].set(0);
             sh.flushed.add(new AtomicLong(startWm));
             sh.durable.add(new AtomicLong(journaled ? startWm : -1L));
+            sh.counters.add(new Stats.EngineCounters());
+            sh.io.add(new Stats.IoStats());
         }
 
         // journals first, so I/O errors surface from build()
@@ -438,7 +461,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
                 if (!jc.append()) Journal.clearDir(jc.dir(), jc.format());
                 for (int p = 0; p < P; p++) {
                     cmdW[p] = new ChunkWriter(Journal.open(jc, Journal.Kind.Cmd, p, P, b.book), jc.fsync(),
-                            sh.flushed.get(p), sh.durable.get(p), "orderer-cmd-io-" + p);
+                            sh.flushed.get(p), sh.durable.get(p), "orderer-cmd-io-" + p, sh.io.get(p));
                     if (jc.events())
                         evtW[p] = new ChunkWriter(Journal.open(jc, Journal.Kind.Evt, p, P, b.book), null,
                                 new AtomicLong(), new AtomicLong(), "orderer-evt-io-" + p);
@@ -459,6 +482,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
             ib.consumer(b.waits.engine());
             var inbox = ib.buildSingle();
             RingControl<CmdMsg> ictl = inbox.producer().control();
+            sh.inboxCtl.add(ictl);
             sh.alerts.add(ictl::alert);
             inboxes.add(inbox.producer());
 
@@ -466,9 +490,10 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
             ob.consumer(b.waits.egress());
             var outbox = ob.buildSingle();
             RingControl<EvtMsg> octl = outbox.producer().control();
+            sh.outboxCtl.add(octl);
             sh.alerts.add(octl::alert);
 
-            Engine<C> eng = new Engine<>(sh, inbox.consumers().get(0), outbox.producer(), cores.get(p), cmdW[p],
+            Engine<C> eng = new Engine<>(sh, sh.counters.get(p), inbox.consumers().get(0), outbox.producer(), cores.get(p), cmdW[p],
                     journaled ? b.journal.format() : null,
                     journaled ? new Segmenter(b.journal.dir(), b.journal.format(), Journal.Kind.Cmd, p, P, b.book) : null);
             threads.add(thread("orderer-engine-" + p, () -> guarded(sh, "engine", eng::run)));
@@ -492,6 +517,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         rb.consumer(b.waits.router());
         var ing = rb.buildMulti();
         RingControl<CmdMsg> gctl = ing.producer().control();
+        sh.ingressCtl = gctl;
         sh.alerts.add(gctl::alert);
         ingress = ing.producer();
         Consumer<CmdMsg> rcons = ing.consumers().get(0);
@@ -574,13 +600,18 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         long iseq, tPub;
         boolean stop, force;
 
-        Engine(Shared sh, Consumer<CmdMsg> inbox, SingleProducer<EvtMsg> out, C core, ChunkWriter journal, Journal.Format fmt,
-               Segmenter seg) {
+        final Stats.EngineCounters counters;
+        long nCommands, nEvents;
+
+        Engine(Shared sh, Stats.EngineCounters counters, Consumer<CmdMsg> inbox, SingleProducer<EvtMsg> out, C core,
+               ChunkWriter journal, Journal.Format fmt, Segmenter seg) {
+            this.counters = counters;
             this.sh = sh; this.inbox = inbox; this.out = out; this.core = core; this.journal = journal; this.fmt = fmt;
             this.seg = seg;
         }
 
         public void onEvent(long sym, long seq, Event ev) {
+            nEvents++;
             EvtMsg e = out.stage();
             if (e == null) throw new IllegalStateException("outbox alerted");
             e.iseq = iseq; e.seq = seq; e.tPub = tPub; e.arg = 0; e.symbol = sym; e.ctl = Control.None; e.ev = ev;
@@ -591,6 +622,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
                 if (journal != null) journal.pushCmd(fmt, m.iseq, m.symbol, m.cmd);  // journal-before-apply
                 iseq = m.iseq;
                 tPub = m.tPub;
+                nCommands++;
                 core.apply(m.symbol, m.cmd, this);
             } else {
                 // the new segment starts at this cut, before the snapshot is reported
@@ -628,6 +660,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
             for (;;) {
                 force = false;
                 int n = inbox.poll(this);
+                if (n > 0) { counters.commands = nCommands; counters.events = nEvents; }
                 if (stop || inbox.isAlerted()) break;
                 if (journal != null && journal.pending() > 0
                         && (force || (n == 0 && System.nanoTime() - lastHandoff >= 50_000))) {
