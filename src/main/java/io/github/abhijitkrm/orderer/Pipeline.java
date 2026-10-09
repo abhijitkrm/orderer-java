@@ -99,6 +99,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         final Map<Long, SnapState> snaps = new HashMap<>();  // guarded by itself
         final List<AtomicLong> flushed = new ArrayList<>(), durable = new ArrayList<>();
         final CopyOnWriteArrayList<Runnable> alerts = new CopyOnWriteArrayList<>();
+        Journal.Config2 journal;
 
         void alertAll() { for (Runnable a : alerts) a.run(); }
         void fail(String m) {
@@ -258,14 +259,36 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
     }
 
     /// A consistent snapshot of every book, cut at this point of the ingress order.
-    public Snapshot snapshot() {
+    public Snapshot snapshot() { return snapshotOp(Control.Snapshot); }
+
+    /// A checkpoint (spec/JOURNAL.md §6): a snapshot cut here; every journal
+    /// rotates onto a new segment at the cut; the snapshot is written durably
+    /// into the journal directory; older segments and checkpoints are removed.
+    public Snapshot checkpoint() {
+        Journal.Config2 cfg = sh.journal;
+        if (cfg == null) throw new PipelineError(PipelineError.Kind.Config, "checkpoint needs journals");
+        Snapshot s = snapshotOp(Control.Checkpoint);
+        drain();  // every egress has rotated its event journal
+        try {
+            Path path = Journal.checkpointPath(cfg.dir(), s.iseq());
+            Journal.writeDurably(path, s.body().getBytes(StandardCharsets.UTF_8));
+            Journal.writeDurably(metaPath(path), s.meta().getBytes(StandardCharsets.UTF_8));
+            Journal.removeSegmentsBelow(cfg.dir(), cfg.format(), s.iseq());
+            Journal.removeCheckpointsBelow(cfg.dir(), s.iseq());
+        } catch (IOException e) {
+            throw new PipelineError(PipelineError.Kind.Io, String.valueOf(e.getMessage()));
+        }
+        return s;
+    }
+
+    private Snapshot snapshotOp(Control ctl) {
         long op = sh.nextOp.incrementAndGet();
         synchronized (sh.snaps) {
             SnapState st = new SnapState();
             st.remaining = sh.partitions;
             sh.snaps.put(op, st);
         }
-        publishCtl(Control.Snapshot, op);
+        publishCtl(ctl, op);
         SnapState st;
         synchronized (sh.snaps) {
             for (;;) {
@@ -327,12 +350,22 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         boolean stopped;
     }
 
+    /// Opens a partition's next journal segment (spec/JOURNAL.md §6 step 2).
+    record Segmenter(Path dir, Journal.Format format, Journal.Kind kind, int p, int partitions, Config book) {
+        void rotate(ChunkWriter w, long cut) {
+            try { w.rotate(Journal.openSegment(dir, format, kind, p, partitions, book, cut)); }
+            catch (IOException e) { throw new IllegalStateException("journal rotate: " + e.getMessage(), e); }
+        }
+    }
+
     /// The event journal as the first plug of its partition.
     static final class EvtJournal implements Egress {
         final ChunkWriter w;
         final Journal.Format f;
+        final Segmenter seg;
         long lastHandoff = System.nanoTime();
-        EvtJournal(ChunkWriter w, Journal.Format f) { this.w = w; this.f = f; }
+        EvtJournal(ChunkWriter w, Journal.Format f, Segmenter seg) { this.w = w; this.f = f; this.seg = seg; }
+        public void onCheckpoint(long cut) { seg.rotate(w, cut); }
         public void onEvent(EvtMsg m) { w.pushEvt(f, m.seq, m.symbol, m.ev); }
         public void onIdle() {
             if (w.pending() > 0 && System.nanoTime() - lastHandoff >= 50_000) {
@@ -371,6 +404,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         sh.partitions = P;
         sh.book = b.book;
         sh.timestamps = b.timestamps;
+        sh.journal = b.journal;
         sh.egressEpoch = new Disruptor.Sequence[P];
         for (int p = 0; p < P; p++) {
             sh.egressEpoch[p] = new Disruptor.Sequence();
@@ -385,6 +419,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
             Journal.Config2 jc = b.journal;
             try {
                 Files.createDirectories(jc.dir());
+                if (!jc.append()) Journal.clearDir(jc.dir(), jc.format());
                 for (int p = 0; p < P; p++) {
                     cmdW[p] = new ChunkWriter(Journal.open(jc, Journal.Kind.Cmd, p, P, b.book), jc.fsync(),
                             sh.flushed.get(p), sh.durable.get(p), "orderer-cmd-io-" + p);
@@ -418,14 +453,17 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
             sh.alerts.add(octl::alert);
 
             Engine<C> eng = new Engine<>(sh, inbox.consumers().get(0), outbox.producer(), cores.get(p), cmdW[p],
-                    journaled ? b.journal.format() : null);
+                    journaled ? b.journal.format() : null,
+                    journaled ? new Segmenter(b.journal.dir(), b.journal.format(), Journal.Kind.Cmd, p, P, b.book) : null);
             threads.add(thread("orderer-engine-" + p, () -> guarded(sh, "engine", eng::run)));
 
             EgressPart part = new EgressPart();
             part.p = p;
             part.outbox = outbox.consumers().get(0);
             part.ctx = new Egress.Ctx(p, P, sh.epoch, sh.durable.get(p));
-            if (evtW[p] != null) part.plugs.add(new EvtJournal(evtW[p], b.journal.format()));
+            if (evtW[p] != null)
+                part.plugs.add(new EvtJournal(evtW[p], b.journal.format(),
+                        new Segmenter(b.journal.dir(), b.journal.format(), Journal.Kind.Evt, p, P, b.book)));
             for (Egress.Factory f : b.egress) part.plugs.add(f.create(part.ctx));
             groups.get(p % nEgress).add(part);
         }
@@ -491,11 +529,14 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         final C core;
         final ChunkWriter journal;
         final Journal.Format fmt;
+        final Segmenter seg;
         long iseq, tPub;
         boolean stop, force;
 
-        Engine(Shared sh, Consumer<CmdMsg> inbox, SingleProducer<EvtMsg> out, C core, ChunkWriter journal, Journal.Format fmt) {
+        Engine(Shared sh, Consumer<CmdMsg> inbox, SingleProducer<EvtMsg> out, C core, ChunkWriter journal, Journal.Format fmt,
+               Segmenter seg) {
             this.sh = sh; this.inbox = inbox; this.out = out; this.core = core; this.journal = journal; this.fmt = fmt;
+            this.seg = seg;
         }
 
         public void onEvent(long sym, long seq, Event ev) {
@@ -511,7 +552,9 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
                 tPub = m.tPub;
                 core.apply(m.symbol, m.cmd, this);
             } else {
-                if (m.ctl == Control.Snapshot) {
+                // the new segment starts at this cut, before the snapshot is reported
+                if (m.ctl == Control.Checkpoint && journal != null) seg.rotate(journal, m.iseq);
+                if (m.ctl == Control.Snapshot || m.ctl == Control.Checkpoint) {
                     List<Block> blocks = new ArrayList<>();
                     core.snapshotBlocks(blocks);
                     synchronized (sh.snaps) {
@@ -576,6 +619,8 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
                         sh.egressEpoch[ep.p].set(m.arg);
                     } else if (m.ctl == Control.Shutdown) {
                         stop[0] = true;
+                    } else if (m.ctl == Control.Checkpoint) {
+                        for (Egress pl : ep.plugs) pl.onCheckpoint(m.iseq);
                     }
                     if (eob) for (Egress pl : ep.plugs) pl.onBatchEnd();
                 });

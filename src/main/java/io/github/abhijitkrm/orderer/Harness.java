@@ -146,18 +146,58 @@ public final class Harness {
 
     public record Run(String listing, Snapshot snapshot) {}
 
+    /// spec/HARNESS.md §4.1 options beyond the common ones: --checkpoint-every K
+    /// (0 = off) and --durable (1.2).
+    public record RunOpts(boolean snapshot, long checkpointEvery, boolean durable) {}
+
+    public static Run runCorpus(Corpus corpus, Common c, boolean tagged, boolean snapshot) {
+        return runCorpus(corpus, c, tagged, new RunOpts(snapshot, 0, false));
+    }
+
     /// Run a corpus through a fresh pipeline (one producer, file order), drain,
     /// optionally snapshot, shut down. Returns the spec/HARNESS.md §3 listing.
-    public static Run runCorpus(Corpus corpus, Common c, boolean tagged, boolean snapshot) {
+    public static Run runCorpus(Corpus corpus, Common c, boolean tagged, RunOpts opts) {
+        boolean snapshot = opts.snapshot();
         Egress.Collect col = Egress.collect(tagged);
         var b = Pipeline.builder().bookConfig(corpus.book).partitionMap(c.map()).egress(col.factory());
-        if (c.journal() != null) b.journal(c.journal());
+        if (c.journal() != null) {
+            Journal.Config2 j = c.journal();
+            if (opts.durable()) {
+                j = j.withFsync(Journal.FsyncPolicy.everyN(64));
+                b.egress(Egress.acks(new Egress.Fn() {
+                    long last;
+                    public void accept(int p, Egress.EvtMsg m) {
+                        if (m.iseq != last) {
+                            last = m.iseq;
+                            synchronized (System.err) {
+                                System.err.println("acked " + p + " " + Long.toUnsignedString(m.iseq));
+                                System.err.flush();
+                            }
+                        }
+                    }
+                }));
+            }
+            b.journal(j);
+        } else if (opts.durable() || opts.checkpointEvery() > 0) {
+            throw die("--durable and --checkpoint-every need --journal-dir");
+        }
         Pipeline<Core.FifoCore> p;
         try { p = b.build(); }
         catch (RuntimeException e) { throw die(e.getMessage()); }
         Snapshot snap = null;
         try {
-            if (p.publishBatch(corpus.syms, corpus.cmds) != Pipeline.Status.Ok) throw fail("pipeline closed");
+            if (opts.checkpointEvery() > 0) {
+                int k = (int) Math.min(opts.checkpointEvery(), Integer.MAX_VALUE);
+                Pipeline.Handle h = p.handle();
+                for (int off = 0; off < corpus.cmds.length; off += k) {
+                    int n = Math.min(k, corpus.cmds.length - off);
+                    if (h.publishBatch(corpus.syms, corpus.cmds, off, n) != Pipeline.Status.Ok) throw fail("pipeline closed");
+                    if (n == k) p.checkpoint();
+                }
+                h.close();
+            } else if (p.publishBatch(corpus.syms, corpus.cmds) != Pipeline.Status.Ok) {
+                throw fail("pipeline closed");
+            }
             p.drain();
             if (snapshot) snap = p.snapshot();
             p.shutdown();

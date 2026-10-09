@@ -1,9 +1,11 @@
 //! orderrecover — spec/HARNESS.md §4.3 (mirrors matcherrecover).
 //!   orderrecover <snapshot> <tail-file> [--partitions P] [--partition-map F]
-//!   orderrecover --journal-dir DIR [--snap PATH] [--binary] [--partitions P] [--partition-map F]
+//!   orderrecover --journal-dir DIR [--snap PATH] [--binary] [--repair] [--partitions P] [--partition-map F]
 //! Tail form: restore, submit every tail line without "format" through a
 //! pipeline, print the replayed events. Journal form: recover from journals
-//! (after the optional snapshot's cut). Malformed/corrupt input exits 2.
+//! (after the optional snapshot's cut; by default the directory's newest
+//! checkpoint). Malformed/corrupt input exits 2; --repair first truncates torn
+//! tails (spec/JOURNAL.md §5.1).
 package io.github.abhijitkrm.orderer.tools;
 
 import io.github.abhijitkrm.matcher.OrderBook.Config;
@@ -61,11 +63,18 @@ public final class OrderRecover {
         Harness.print(col.handle().listing());
     }
 
-    static void journalForm(String dir, String snapPath, Journal.Format fmt, PartitionMap map) {
+    static void journalForm(String dir, String snapPath, Journal.Format fmt, boolean repair, PartitionMap map) {
         List<StringBuilder> parts = new ArrayList<>();
         for (int p = 0; p < map.partitions(); p++) parts.add(new StringBuilder());
         try {
-            Pipeline.Snapshot snap = snapPath == null ? null : Recover.readSnapshot(Path.of(snapPath));
+            if (repair)
+                for (Journal.Repaired r : Journal.repairDir(Path.of(dir), fmt)) System.err.println("repaired " + r.path() + " " + r.bytes());
+            Pipeline.Snapshot snap = null;
+            if (snapPath != null) snap = Recover.readSnapshot(Path.of(snapPath));
+            else {
+                List<Journal.Checkpoint> cps = Journal.listCheckpoints(Path.of(dir));
+                if (!cps.isEmpty()) snap = Recover.readSnapshot(cps.get(cps.size() - 1).path());
+            }
             Recover.recover(Core.FifoCore::new, Config.defaults(), map, snap, new Recover.JournalSource(Path.of(dir), fmt),
                     (p, s, seq, ev) -> parts.get(p).append(Event.canonical(seq, s, ev)).append('\n'));
         } catch (RuntimeException e) {
@@ -78,13 +87,13 @@ public final class OrderRecover {
 
     public static void main(String[] argv) {
         String usage = "orderrecover <snapshot> <tail-file> [--partitions P] [--partition-map F]\n"
-                + "       orderrecover --journal-dir DIR [--snap PATH] [--binary] [--partitions P] [--partition-map F]";
-        Args a = new Args(argv, usage, List.of("--partitions", "--partition-map", "--journal-dir", "--snap"), List.of("--binary"));
+                + "       orderrecover --journal-dir DIR [--snap PATH] [--binary] [--repair] [--partitions P] [--partition-map F]";
+        Args a = new Args(argv, usage, List.of("--partitions", "--partition-map", "--journal-dir", "--snap"), List.of("--binary", "--repair"));
         PartitionMap map = Harness.partitionMap(a);
         String dir = a.get("--journal-dir");
         if (dir != null && a.positional.isEmpty()) {
-            journalForm(dir, a.get("--snap"), a.flag("--binary") ? Journal.Format.Binary : Journal.Format.Jsonl, map);
-        } else if (dir == null && a.positional.size() == 2 && a.get("--snap") == null && !a.flag("--binary")) {
+            journalForm(dir, a.get("--snap"), a.flag("--binary") ? Journal.Format.Binary : Journal.Format.Jsonl, a.flag("--repair"), map);
+        } else if (dir == null && a.positional.size() == 2 && a.get("--snap") == null && !a.flag("--binary") && !a.flag("--repair")) {
             tailForm(a.positional.get(0), a.positional.get(1), map);
         } else {
             throw Harness.die(usage);

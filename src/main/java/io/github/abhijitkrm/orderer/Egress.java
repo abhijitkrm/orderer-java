@@ -15,10 +15,11 @@ public interface Egress {
     default void onBatchEnd() {}      // after a ring batch / before a drain completes
     default void onIdle() {}          // while idle: release gated work
     default void onShutdown() {}      // once, after every event
+    default void onCheckpoint(long cut) {} // a checkpoint cut passed (1.2)
 
     /// Control operations ride the rings so they cut every partition at the
     /// same point of the ingress order (spec/PIPELINE.md §6).
-    enum Control { None, Barrier, Snapshot, Shutdown }
+    enum Control { None, Barrier, Snapshot, Shutdown, Checkpoint }
 
     /// Ingress / inbox slot (mutable flyweight).
     final class CmdMsg {

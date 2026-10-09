@@ -200,6 +200,9 @@ public final class PipelineTest {
                 back = good.clone();
                 int off = back.length - Journal.CMD_RECORD;
                 for (int i = 0; i < 8; i++) back[off + i] = (byte) (i == 0 ? 1 : 0);
+                // a well-formed (resealed) record, just out of order
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(back).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                bb.putInt(off + Journal.CMD_RECORD_V1, Journal.crc32c(bb, off, Journal.CMD_RECORD_V1));
             } else {
                 byte[] extra = "{\"cmd\":\"cancel\",\"symbol\":0,\"order_id\":1,\"iseq\":3}\n".getBytes();
                 back = Arrays.copyOf(good, good.length + extra.length);
@@ -365,6 +368,127 @@ public final class PipelineTest {
         check(failed);
     }
 
+    // ---- 1.2: checksums, repair, checkpoints -------------------------------------------------
+
+    static void crc32cMatchesTheSpecCheckValue() {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap("123456789".getBytes());
+        check(Journal.crc32c(b, 0, 9) == 0xE3069283, "check value");
+    }
+
+    static void checksumsCatchFlippedBitsAnywhere() throws Exception {
+        Path dir = T.scratch(SCRATCH, "crc");
+        T.Cmds cmds = T.fuzzCorpus(9, 300, 2);
+        try (var p = Pipeline.builder().bookConfig(CFG).journal(jcfg(dir, Format.Binary)).build()) {
+            p.publishBatch(cmds.symArray(), cmds.cmdArray());
+        }
+        Path path = Journal.path(dir, Journal.Kind.Cmd, 0, Format.Binary);
+        byte[] bad = Files.readAllBytes(path);
+        bad[Journal.HEADER + 100 * Journal.CMD_RECORD + 20] ^= 0x10;
+        Files.write(path, bad);
+        boolean threw = false;
+        try { Journal.readCmdDir(dir, Format.Binary); }
+        catch (Journal.CorruptJournal e) { threw = e.getMessage().contains("checksum"); }
+        check(threw, "strict");
+        threw = false;
+        try { Journal.repairDir(dir, Format.Binary); } catch (Journal.CorruptJournal e) { threw = true; }
+        check(threw, "mid-file damage is not repairable");
+    }
+
+    static void repairCutsOnlyATornTail() throws Exception {
+        T.Cmds cmds = T.fuzzCorpus(10, 400, 3);
+        for (Format fmt : Format.values()) {
+            Path dir = T.scratch(SCRATCH, "repair-" + fmt);
+            try (var p = Pipeline.builder().bookConfig(CFG).journal(jcfg(dir, fmt)).build()) {
+                p.publishBatch(cmds.symArray(), cmds.cmdArray());
+            }
+            Path path = Journal.path(dir, Journal.Kind.Cmd, 0, fmt);
+            byte[] good = Files.readAllBytes(path);
+            List<CmdRecord> full = Journal.readCmdDir(dir, fmt).partitions().get(0);
+            Files.write(path, Arrays.copyOf(good, good.length - 5));
+            boolean threw = false;
+            try { Journal.readCmdDir(dir, fmt); } catch (Journal.CorruptJournal e) { threw = true; }
+            check(threw, "strict rejects a torn tail");
+            check(Journal.repairDir(dir, fmt).size() == 1);
+            check(Journal.readCmdDir(dir, fmt).partitions().get(0).equals(full.subList(0, full.size() - 1)), "a prefix survives");
+            if (fmt == Format.Binary) {
+                byte[] zeroed = good.clone();
+                Arrays.fill(zeroed, zeroed.length - Journal.CMD_RECORD, zeroed.length, (byte) 0);
+                Files.write(path, zeroed);
+                check(Journal.repairDir(dir, fmt).size() == 1, "a complete record that never reached the disk");
+                check(Journal.readCmdDir(dir, fmt).partitions().get(0).size() == full.size() - 1);
+            }
+            check(Journal.repairDir(dir, fmt).isEmpty(), "a clean file is left alone");
+        }
+    }
+
+    static void checkpointsRotateSegmentsAndBoundRecovery() {
+        T.Cmds cmds = T.fuzzCorpus(12, 3000, 6);
+        for (Format fmt : Format.values()) {
+            Path dir = T.scratch(SCRATCH, "ckpt-" + fmt);
+            Egress.Collect col = Egress.collect(true);
+            Snapshot c1, c2;
+            try (var p = Pipeline.builder().bookConfig(CFG).partitions(3).journal(jcfg(dir, fmt)).egress(col.factory()).build()) {
+                T.Cmds a = cmds.slice(0, 1000), b = cmds.slice(1000, 2200), c = cmds.slice(2200, cmds.size());
+                p.publishBatch(a.symArray(), a.cmdArray());
+                c1 = p.checkpoint();
+                p.publishBatch(b.symArray(), b.cmdArray());
+                c2 = p.checkpoint();
+                p.publishBatch(c.symArray(), c.cmdArray());
+            }
+            check(c1.iseq() == 1000 && c2.iseq() == 2200);
+            List<Journal.Checkpoint> cps = Journal.listCheckpoints(dir);
+            check(cps.size() == 1 && cps.get(0).cut() == 2200, "only the last checkpoint remains");
+            for (Journal.Kind k : Journal.Kind.values()) {
+                List<Journal.Segment> segs = Journal.listSegments(dir, k, fmt);
+                check(segs.size() == 3);
+                for (Journal.Segment s : segs) check(s.start() == 2200, s.path());
+            }
+            check(c2.body().equals(T.referenceSnapshot(CFG, cmds, 2200)));
+            List<String> replayed = new ArrayList<>();
+            var rec = Recover.recover(Core.FifoCore::new, CFG, new PartitionMap(3), Recover.readSnapshot(cps.get(0).path()),
+                    new Recover.JournalSource(dir, fmt),
+                    (q, s, seq, e) -> replayed.add(io.github.abhijitkrm.matcher.Types.Event.canonical(seq, s, e)));
+            List<String> all = T.referenceLines(CFG, cmds);
+            int prefix = T.referenceLines(CFG, cmds.slice(0, 2200)).size();
+            check(rec.replayed() == cmds.size() - 2200);
+            check(all.subList(prefix, all.size()).equals(replayed), "recover from the checkpoint");
+            List<String> evts = new ArrayList<>();
+            for (int q = 0; q < 3; q++) evts.addAll(Journal.readEvtPartition(dir, fmt, q));
+            List<String> want = new ArrayList<>(all.subList(prefix, all.size()));
+            java.util.Collections.sort(evts);
+            java.util.Collections.sort(want);
+            check(evts.equals(want), "event segments hold the tail");
+            check(T.lines(col.handle().listing()).size() == all.size());
+        }
+    }
+
+    static void appendContinuesTheLastSegmentAfterACheckpoint() {
+        T.Cmds cmds = T.fuzzCorpus(14, 2000, 4);
+        Path dir = T.scratch(SCRATCH, "ckpt-append");
+        Journal.Config2 j = jcfg(dir, Format.Binary);
+        try (var p = Pipeline.builder().bookConfig(CFG).partitions(2).journal(j).build()) {
+            T.Cmds a = cmds.slice(0, 800), b = cmds.slice(800, 1200);
+            p.publishBatch(a.symArray(), a.cmdArray());
+            p.checkpoint();
+            p.publishBatch(b.symArray(), b.cmdArray());
+        }
+        PartitionMap m = new PartitionMap(2);
+        var rec = Recover.recover(Core.FifoCore::new, CFG, m, Recover.readSnapshot(Journal.listCheckpoints(dir).get(0).path()),
+                new Recover.JournalSource(dir, Format.Binary), (q, s, seq, e) -> {});
+        check(rec.lastIseq() == 1200);
+        Snapshot snap;
+        try (var p = Pipeline.builder().bookConfig(rec.book()).partitionMap(m).journal(j.withAppend(true))
+                .initial(rec.toInitial()).build()) {
+            T.Cmds c = cmds.slice(1200, cmds.size());
+            p.publishBatch(c.symArray(), c.cmdArray());
+            snap = p.snapshot();
+        }
+        check(snap.iseq() == 2000 && snap.body().equals(T.referenceSnapshot(CFG, cmds, 2000)));
+        long total = 0;
+        for (var r : Journal.readCmdDir(dir, Format.Binary).partitions()) total += r.size();
+        check(total == 1200, "800 checkpointed away");
+    }
+
     public static void main(String[] args) {
         if (args.length > 0) SCRATCH = Path.of(args[0]);
         T.runAll(new Object[][] {
@@ -383,6 +507,11 @@ public final class PipelineTest {
             {"try_publish_sheds_at_the_edge_only", (T.Body) PipelineTest::tryPublishShedsAtTheEdgeOnly},
             {"noop_core_sees_every_command", (T.Body) PipelineTest::noopCoreSeesEveryCommand},
             {"failing_core_fails_the_pipeline_instead_of_hanging", (T.Body) PipelineTest::failingCoreFailsThePipelineInsteadOfHanging},
+            {"crc32c_matches_the_spec_check_value", (T.Body) PipelineTest::crc32cMatchesTheSpecCheckValue},
+            {"checksums_catch_flipped_bits_anywhere", (T.Body) PipelineTest::checksumsCatchFlippedBitsAnywhere},
+            {"repair_cuts_only_a_torn_tail", (T.Body) PipelineTest::repairCutsOnlyATornTail},
+            {"checkpoints_rotate_segments_and_bound_recovery", (T.Body) PipelineTest::checkpointsRotateSegmentsAndBoundRecovery},
+            {"append_continues_the_last_segment_after_a_checkpoint", (T.Body) PipelineTest::appendContinuesTheLastSegmentAfterACheckpoint},
         });
     }
 }

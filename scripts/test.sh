@@ -9,4 +9,4 @@ for t in RingTest GoldenTest PipelineTest; do
   java -ea -cp out:out-test io.github.abhijitkrm.orderer.$t
 done
 java -cp out:out-test io.github.abhijitkrm.orderer.Quickstart > /dev/null
-tests/vectors.sh harness/bin vectors
+spec/conformance.sh harness/bin vectors

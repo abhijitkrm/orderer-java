@@ -5,7 +5,7 @@
 The Java implementation of [orderer](https://github.com/abhijitkrm/orderer):
 an LMAX-Disruptor-style, multi-core order-matching engine around the
 [matcher](https://github.com/abhijitkrm/matcher) order book. It needs Java 17+
-and nothing else, and implements `orderer-spec/1.1`. It is a port of
+and nothing else, and implements `orderer-spec/1.2`. It is a port of
 [orderer-rust](https://github.com/abhijitkrm/orderer-rust), and
 **byte-identical** to it: listings, per-partition journals (JSONL and
 binary), snapshots and exit codes.
@@ -44,7 +44,8 @@ The runnable version is `src/test/java/.../Quickstart.java`.
 | Routing | `Routing.PartitionMap` | hash (spec/ROUTING.md) + table overrides |
 | Journals | `Journal.Config2`, `Journal.FsyncPolicy` | JSONL or binary, group-commit fsync on I/O threads |
 | Waiting | `Pipeline.Waits` / `Disruptor.WaitStrategy` | BusySpin, Yield, Backoff, Blocking |
-| Recovery | `Recover.recover(…)`, `readSnapshot`, `restore` | snapshot + journals → cores at any P |
+| Recovery | `Recover.recover(…)`, `readSnapshot`, `restore`, `Journal.repairDir` | snapshot + journals → cores at any P; torn tails repaired |
+| Checkpoints | `Pipeline.checkpoint()` | durable snapshot + journal segment rotation; old segments removed |
 
 ## Build, test, harness
 
@@ -63,7 +64,8 @@ The suites:
   the pipeline at P=1 and P=4, in both index modes, plus the routing vectors.
 - `PipelineTest`: partitions, recovery, controls, durability,
   backpressure, plugs.
-- `tests/vectors.sh`: orderer vectors through the harness tools, byte-exact.
+- `spec/conformance.sh` (vendored): every orderer vector through the
+  harness tools, byte-exact, checkpoints, repair and version-1 journals included.
 
 Cross-implementation proofs (diffuzz, exhaustive, e2e, snapdiff) run from
 the spec repo with this repo checked out next to it.
