@@ -527,7 +527,7 @@ public final class PipelineTest {
             p.publishBatch(cmds.symArray(), cmds.cmdArray());
             p.drain();
             long deadline = System.nanoTime() + 10_000_000_000L;
-            while (p.stats().partitions().stream().anyMatch(s -> s.durableIseq() < s.flushedIseq()) && System.nanoTime() < deadline)
+            while (p.stats().partitions().stream().anyMatch(s -> s.fsyncs() == 0 || s.durableIseq() < s.flushedIseq()) && System.nanoTime() < deadline)
                 T.sleep(5);
             Stats.PipelineStats st = p.stats();
             check(st.ingressDepth() == 0 && st.partitions().size() == 3);
