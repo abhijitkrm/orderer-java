@@ -270,7 +270,7 @@ public final class OrderBench {
                 row.ops, opsS, eff, mean, pct(row.lat, 0.5), pct(row.lat, 0.9), pct(row.lat, 0.99), pct(row.lat, 0.999),
                 row.lat.length == 0 ? 0 : row.lat[row.lat.length - 1], String.join(" ", config));
         System.out.flush();
-        System.err.println("env: " + cpu() + " / orderer-java 0.1.0 / java " + System.getProperty("java.version"));
+        System.err.println("env: " + cpu() + " / orderer-java 0.2.0 / java " + System.getProperty("java.version"));
         System.exit(0);
     }
 }

@@ -16,6 +16,13 @@ Handle.publish ─▶ ingress ─▶ router ─┬─▶ inbox[p] ─▶ engine[
                   producer)   route) └─▶ …            apply)
 ```
 
+## Install
+
+`scripts/package.sh` builds `dist/orderer-0.2.0.jar` (plus sources and
+javadoc jars) with plain JDK tools; `pom.xml` describes the same artifact
+(`io.github.abhijitkrm:orderer:0.2.0`) for Maven. It is not yet on Maven
+Central.
+
 ## Quick start
 
 ```java

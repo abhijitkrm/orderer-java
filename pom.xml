@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Maven build for publishing. The suites run through scripts/test.sh (their
+     own runner, not JUnit), so Maven skips tests; scripts/package.sh builds the
+     same jars with plain JDK tools. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>io.github.abhijitkrm</groupId>
+  <artifactId>orderer</artifactId>
+  <version>0.2.0</version>
+  <packaging>jar</packaging>
+  <name>orderer-java</name>
+  <description>LMAX-Disruptor-style multi-core order-matching pipeline around matcher-java (orderer-spec/1.2)</description>
+  <url>https://github.com/abhijitkrm/orderer-java</url>
+  <licenses>
+    <license><name>MIT</name><url>https://opensource.org/licenses/MIT</url></license>
+    <license><name>Apache-2.0</name><url>https://www.apache.org/licenses/LICENSE-2.0</url></license>
+  </licenses>
+  <developers>
+    <developer><id>abhijitkrm</id><name>Abhijit Kumar</name></developer>
+  </developers>
+  <scm>
+    <url>https://github.com/abhijitkrm/orderer-java</url>
+    <connection>scm:git:https://github.com/abhijitkrm/orderer-java.git</connection>
+  </scm>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.test.skip>true</maven.test.skip>
+  </properties>
+</project>
