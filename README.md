@@ -5,7 +5,7 @@
 The Java implementation of [orderer](https://github.com/abhijitkrm/orderer):
 an LMAX-Disruptor-style, multi-core order-matching engine around the
 [matcher](https://github.com/abhijitkrm/matcher) order book. It needs Java 17+
-and nothing else, and implements `orderer-spec/1.2`. It is a port of
+and nothing else, and implements `orderer-spec/1.3`. It is a port of
 [orderer-rust](https://github.com/abhijitkrm/orderer-rust), and
 **byte-identical** to it: listings, per-partition journals (JSONL and
 binary), snapshots and exit codes.
@@ -18,9 +18,9 @@ Handle.publish ─▶ ingress ─▶ router ─┬─▶ inbox[p] ─▶ engine[
 
 ## Install
 
-`scripts/package.sh` builds `dist/orderer-0.2.0.jar` (plus sources and
+`scripts/package.sh` builds `dist/orderer-0.2.1.jar` (plus sources and
 javadoc jars) with plain JDK tools; `pom.xml` describes the same artifact
-(`io.github.abhijitkrm:orderer:0.2.0`) for Maven. It is not yet on Maven
+(`io.github.abhijitkrm:orderer:0.2.1`) for Maven. It is not yet on Maven
 Central.
 
 ## Quick start
