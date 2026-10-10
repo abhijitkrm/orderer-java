@@ -314,6 +314,10 @@ public final class Journal {
             Header h = parseBinaryHeader(p, bytes);
             int size = h.kind().recordSize(h.version()), body = bytes.length - HEADER, n = body / size;
             if (body % size != 0 && mode == ReadMode.Strict) throw corrupt(p, "torn tail (partial record)");
+            if (mode == ReadMode.Repair) {
+                // 1.3: zero records an interrupted write left (§5.1)
+                while (n > 0 && allZero(bytes, HEADER + (n - 1) * size, HEADER + n * size)) n--;
+            }
             if (h.version() >= 2) {
                 ByteBuffer bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
                 for (int i = 0; i < n; i++) {
@@ -446,23 +450,71 @@ public final class Journal {
     public static List<Repaired> repairDir(Path dir, Format f) {
         List<Repaired> out = new ArrayList<>();
         for (Kind k : Kind.values()) {
-            TreeMap<Integer, Path> last = new TreeMap<>();
-            for (Segment s : listSegments(dir, k, f)) last.put(s.partition(), s.path());
-            for (Path p : last.values()) {
-                byte[] bytes = readAll(p);
-                Body b = splitBody(p, bytes, f, ReadMode.Repair);
-                if (b.validLen() < bytes.length) {
-                    try (FileChannel ch = FileChannel.open(p, StandardOpenOption.WRITE)) {
-                        ch.truncate(b.validLen());
-                        ch.force(true);
+            TreeMap<Integer, List<Segment>> parts = new TreeMap<>();
+            for (Segment s : listSegments(dir, k, f)) parts.computeIfAbsent(s.partition(), x -> new ArrayList<>()).add(s);
+            for (List<Segment> segs : parts.values()) {
+                segs.sort(java.util.Comparator.comparingLong(Segment::start));
+                // 1.3: drop trailing segments a crash left without a usable
+                // header; the segment before becomes the last
+                while (!segs.isEmpty() && segs.get(segs.size() - 1).start() > 0) {
+                    Path p = segs.get(segs.size() - 1).path();
+                    byte[] bytes = readAll(p);
+                    if (!headerless(p, bytes, f)) break;
+                    try {
+                        Files.delete(p);
                     } catch (IOException e) {
                         throw corrupt(p, String.valueOf(e.getMessage()));
                     }
-                    out.add(new Repaired(p, bytes.length - b.validLen()));
+                    try (FileChannel d = FileChannel.open(dir.toAbsolutePath(), StandardOpenOption.READ)) {
+                        d.force(true);
+                    } catch (IOException ignored) {
+                        // some platforms cannot open a directory for sync
+                    }
+                    out.add(new Repaired(p, bytes.length));
+                    segs.remove(segs.size() - 1);
+                }
+                // repair the last segment; while it holds no records, the
+                // one before it too (its writer may still have been finishing it)
+                for (int i = segs.size() - 1; i >= 0; i--) {
+                    Path p = segs.get(i).path();
+                    byte[] bytes = readAll(p);
+                    Body b = splitBody(p, bytes, f, ReadMode.Repair);
+                    if (b.validLen() < bytes.length) {
+                        try (FileChannel ch = FileChannel.open(p, StandardOpenOption.WRITE)) {
+                            ch.truncate(b.validLen());
+                            ch.force(true);
+                        } catch (IOException e) {
+                            throw corrupt(p, String.valueOf(e.getMessage()));
+                        }
+                        out.add(new Repaired(p, bytes.length - b.validLen()));
+                    }
+                    if (b.offsets().length > 0) break;
                 }
             }
         }
         return out;
+    }
+
+    /// A segment that cannot hold a record (spec/JOURNAL.md 1.3 §5.1): JSONL
+    /// with no newline at all, or binary with an invalid header and nothing
+    /// but zeros after it.
+    static boolean headerless(Path p, byte[] bytes, Format f) {
+        if (f == Format.Jsonl) {
+            for (byte x : bytes) if (x == '\n') return false;
+            return true;
+        }
+        if (!allZero(bytes, Math.min(HEADER, bytes.length), bytes.length)) return false;
+        try {
+            parseBinaryHeader(p, bytes);
+            return false;
+        } catch (CorruptJournal e) {
+            return true;
+        }
+    }
+
+    private static boolean allZero(byte[] b, int from, int to) {
+        for (int i = from; i < to; i++) if (b[i] != 0) return false;
+        return true;
     }
 
     // ---- writing -------------------------------------------------------------------------------
