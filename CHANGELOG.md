@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `orderbench --latency on|off`. `off` stops stamping and sampling commands, which
+  the BENCH.md protocol does with two clock reads per command; default `on`.
+  Journals-off pipeline, M1: P=2 no-op core 22.7M -> 41.3M, real core P=3
+  16.4M -> 20.6M.
+
 ## 0.2.1 (orderer-spec/1.3)
 
 - Vendors matcher-java 20e563b: the price ladder finds the next best price through a

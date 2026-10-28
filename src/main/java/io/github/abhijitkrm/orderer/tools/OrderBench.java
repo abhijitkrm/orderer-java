@@ -102,6 +102,7 @@ public final class OrderBench {
         Journal.Config2 journal;
         Pipeline.Waits waits = Pipeline.Waits.lowLatency();
         int ingress = 1 << 14, inbox = 1 << 12, outbox = 1 << 13;
+        boolean latency = true;  // stamp commands and sample end-to-end latency (the BENCH.md protocol)
     }
 
     static <C extends Core.MatchingCore> Pipeline<C> build(Core.Factory<C> f, OrderBook.Config book, PipeOpts o,
@@ -139,7 +140,7 @@ public final class OrderBench {
             ssyms.get(k)[fill[k]] = run.syms[i];
             scmds.get(k)[fill[k]++] = run.cmds[i];
         }
-        p.setTimestamps(true);
+        p.setTimestamps(o.latency);
         CyclicBarrier start = new CyclicBarrier(o.producers + 1);
         List<Thread> ts = new ArrayList<>();
         for (int k = 0; k < o.producers; k++) {
@@ -198,10 +199,10 @@ public final class OrderBench {
     public static void main(String[] argv) throws Exception {
         String usage = "orderbench <prefix> --mode core|pipe [--partitions P] [--producers N] [--journal binary|jsonl|off] "
                 + "[--journal-dir DIR] [--fsync N] [--tag NAME] [--core fifo|noop] [--waits relaxed|low] [--batch N] "
-                + "[--ingress N] [--inbox N] [--outbox N] [--events on|off] [--baseline OPS] [--warmups N]";
+                + "[--ingress N] [--inbox N] [--outbox N] [--events on|off] [--baseline OPS] [--latency on|off] [--warmups N]";
         Args a = new Args(argv, usage, List.of("--mode", "--partitions", "--producers", "--journal", "--journal-dir",
                 "--fsync", "--tag", "--core", "--waits", "--batch", "--ingress", "--inbox", "--outbox", "--events",
-                "--baseline", "--warmups"), List.of());
+                "--baseline", "--warmups", "--latency"), List.of());
         if (a.positional.size() != 1) throw Harness.die(usage);
         String prefix = a.positional.get(0);
         String tag = a.get("--tag") != null ? a.get("--tag") : prefix.substring(prefix.lastIndexOf('/') + 1);
@@ -236,8 +237,11 @@ public final class OrderBench {
             String w = a.get("--waits") != null ? a.get("--waits") : "low";
             if (w.equals("relaxed")) o.waits = Pipeline.Waits.relaxed();
             else if (!w.equals("low")) throw Harness.die("--waits: unknown " + w);
+            String lat = a.get("--latency") != null ? a.get("--latency") : "on";
+            if (lat.equals("off")) o.latency = false;
+            else if (!lat.equals("on")) throw Harness.die("--latency: unknown " + lat);
             config.add("journal=" + jm + " fsync=" + fsync);
-            for (String k : List.of("--core", "--waits", "--batch", "--ingress", "--inbox", "--outbox", "--events", "--warmups"))
+            for (String k : List.of("--core", "--waits", "--batch", "--ingress", "--inbox", "--outbox", "--events", "--warmups", "--latency"))
                 if (a.get(k) != null) config.add(k.substring(2) + "=" + a.get(k));
             String core = a.get("--core") != null ? a.get("--core") : "fifo";
             try {
