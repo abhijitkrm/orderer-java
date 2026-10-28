@@ -103,12 +103,13 @@ public final class OrderBench {
         Pipeline.Waits waits = Pipeline.Waits.lowLatency();
         int ingress = 1 << 14, inbox = 1 << 12, outbox = 1 << 13;
         boolean latency = true;  // stamp commands and sample end-to-end latency (the BENCH.md protocol)
+        Pipeline.EgressPlacement egress = Pipeline.EgressPlacement.Thread;
     }
 
     static <C extends Core.MatchingCore> Pipeline<C> build(Core.Factory<C> f, OrderBook.Config book, PipeOpts o,
                                                            Egress.Factory m) {
         var b = Pipeline.builder(f).bookConfig(book).partitions(o.partitions).waits(o.waits)
-                .ringSizes(o.ingress, o.inbox, o.outbox);
+                .ringSizes(o.ingress, o.inbox, o.outbox).egressPlacement(o.egress);
         if (o.journal != null) b.journal(o.journal);
         if (m != null) b.egress(m);
         return b.build();
@@ -199,10 +200,10 @@ public final class OrderBench {
     public static void main(String[] argv) throws Exception {
         String usage = "orderbench <prefix> --mode core|pipe [--partitions P] [--producers N] [--journal binary|jsonl|off] "
                 + "[--journal-dir DIR] [--fsync N] [--tag NAME] [--core fifo|noop] [--waits relaxed|low] [--batch N] "
-                + "[--ingress N] [--inbox N] [--outbox N] [--events on|off] [--baseline OPS] [--latency on|off] [--warmups N]";
+                + "[--ingress N] [--inbox N] [--outbox N] [--events on|off] [--baseline OPS] [--latency on|off] [--egress thread|inline] [--warmups N]";
         Args a = new Args(argv, usage, List.of("--mode", "--partitions", "--producers", "--journal", "--journal-dir",
                 "--fsync", "--tag", "--core", "--waits", "--batch", "--ingress", "--inbox", "--outbox", "--events",
-                "--baseline", "--warmups", "--latency"), List.of());
+                "--baseline", "--warmups", "--latency", "--egress"), List.of());
         if (a.positional.size() != 1) throw Harness.die(usage);
         String prefix = a.positional.get(0);
         String tag = a.get("--tag") != null ? a.get("--tag") : prefix.substring(prefix.lastIndexOf('/') + 1);
@@ -240,8 +241,11 @@ public final class OrderBench {
             String lat = a.get("--latency") != null ? a.get("--latency") : "on";
             if (lat.equals("off")) o.latency = false;
             else if (!lat.equals("on")) throw Harness.die("--latency: unknown " + lat);
+            String eg = a.get("--egress") != null ? a.get("--egress") : "thread";
+            if (eg.equals("inline")) o.egress = Pipeline.EgressPlacement.Inline;
+            else if (!eg.equals("thread")) throw Harness.die("--egress: unknown " + eg);
             config.add("journal=" + jm + " fsync=" + fsync);
-            for (String k : List.of("--core", "--waits", "--batch", "--ingress", "--inbox", "--outbox", "--events", "--warmups", "--latency"))
+            for (String k : List.of("--core", "--waits", "--batch", "--ingress", "--inbox", "--outbox", "--events", "--warmups", "--latency", "--egress"))
                 if (a.get(k) != null) config.add(k.substring(2) + "=" + a.get(k));
             String core = a.get("--core") != null ? a.get("--core") : "fifo";
             try {

@@ -197,6 +197,19 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         public void close() { sh.handles.remove(flag); }
     }
 
+    /// Where the egress plugs run.
+    public enum EgressPlacement {
+        /// Egress threads fed by a per-partition outbox ring (the default).
+        Thread,
+        /// The engine thread calls the plugs itself right after applying each
+        /// command: no outbox ring, no egress thread, no per-event copy. Plugs run on
+        /// the engine's critical path, so keep them cheap. Requires journals off: the
+        /// event journal and the ack gating on durability are egress-thread work
+        /// (PipelineError.Kind.Config otherwise). Plugs see the same events in the
+        /// same order.
+        Inline
+    }
+
     // ---- Builder ---------------------------------------------------------------------------------
 
     public static final class Builder<C extends MatchingCore> {
@@ -211,6 +224,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         private final List<Egress.Factory> egress = new ArrayList<>();
         private boolean timestamps;
         private int egressThreads = 1;
+        private EgressPlacement egressPlacement = EgressPlacement.Thread;
         private Initial<C> initial;
         private long checkpointEvery;
 
@@ -227,6 +241,8 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         public Builder<C> timestamps(boolean on) { timestamps = on; return this; }
         /// Threads running the partitions' egress plugs (partition p → p % n).
         public Builder<C> egressThreads(int n) { egressThreads = Math.max(n, 1); return this; }
+        /// Where the egress plugs run (default EgressPlacement.Thread).
+        public Builder<C> egressPlacement(EgressPlacement p) { egressPlacement = p; return this; }
         public Builder<C> initial(Initial<C> i) { initial = i; return this; }
         /// Take a checkpoint (spec/JOURNAL.md §6) every `intervalNanos` from a
         /// background thread. Needs journals; shutdown stops the thread first;
@@ -267,7 +283,8 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
             Stats.EngineCounters c = sh.counters.get(p);
             Stats.IoStats io = sh.io.get(p);
             ps.add(new Stats.PartitionStats(p, depth(sh.inboxCtl.get(p).published(), sh.inboxCtl.get(p).consumed()),
-                    depth(sh.outboxCtl.get(p).published(), sh.outboxCtl.get(p).consumed()), c.commands, c.events,
+                    sh.outboxCtl.isEmpty() ? 0 : depth(sh.outboxCtl.get(p).published(), sh.outboxCtl.get(p).consumed()),
+                    c.commands, c.events,
                     sh.journal != null ? sh.flushed.get(p).get() : -1L, sh.durable.get(p).get(),
                     io.fsyncs.get(), io.fsyncNsTotal.get(), io.fsyncNsMax.get()));
         }
@@ -419,6 +436,10 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
     private Pipeline(Builder<C> b) {
         if (b.checkpointEvery > 0 && b.journal == null)
             throw new PipelineError(PipelineError.Kind.Config, "checkpointEvery needs journals");
+        final boolean inlineEgress = b.egressPlacement == EgressPlacement.Inline;
+        if (inlineEgress && b.journal != null)
+            throw new PipelineError(PipelineError.Kind.Config,
+                    "inline egress requires journals off (the event journal and ack gating run on egress threads)");
         PartitionMap m;
         try { m = b.map != null ? b.map : new PartitionMap(b.partitions); }
         catch (Routing.RoutingError e) { throw new PipelineError(PipelineError.Kind.Config, e.getMessage()); }
@@ -486,31 +507,46 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
             sh.alerts.add(ictl::alert);
             inboxes.add(inbox.producer());
 
-            RingBuilder<EvtMsg> ob = new RingBuilder<>(b.outboxSize, EvtMsg::new);
-            ob.consumer(b.waits.egress());
-            var outbox = ob.buildSingle();
-            RingControl<EvtMsg> octl = outbox.producer().control();
-            sh.outboxCtl.add(octl);
-            sh.alerts.add(octl::alert);
+            SingleProducer<EvtMsg> outProducer = null;
+            Consumer<EvtMsg> outConsumer = null;
+            if (!inlineEgress) {
+                RingBuilder<EvtMsg> ob = new RingBuilder<>(b.outboxSize, EvtMsg::new);
+                ob.consumer(b.waits.egress());
+                var outbox = ob.buildSingle();
+                RingControl<EvtMsg> octl = outbox.producer().control();
+                sh.outboxCtl.add(octl);
+                sh.alerts.add(octl::alert);
+                outProducer = outbox.producer();
+                outConsumer = outbox.consumers().get(0);
+            }
 
-            Engine<C> eng = new Engine<>(sh, sh.counters.get(p), inbox.consumers().get(0), outbox.producer(), cores.get(p), cmdW[p],
+            Egress.Ctx ectx = new Egress.Ctx(p, P, sh.epoch, sh.durable.get(p));
+            List<Egress> plugs = new ArrayList<>();
+            if (evtW[p] != null)
+                plugs.add(new EvtJournal(evtW[p], b.journal.format(),
+                        new Segmenter(b.journal.dir(), b.journal.format(), Journal.Kind.Evt, p, P, b.book)));
+            for (Egress.Factory f : b.egress) plugs.add(f.create(ectx));
+
+            Engine<C> eng = new Engine<>(sh, sh.counters.get(p), inbox.consumers().get(0), outProducer, cores.get(p), cmdW[p],
                     journaled ? b.journal.format() : null,
-                    journaled ? new Segmenter(b.journal.dir(), b.journal.format(), Journal.Kind.Cmd, p, P, b.book) : null);
+                    journaled ? new Segmenter(b.journal.dir(), b.journal.format(), Journal.Kind.Cmd, p, P, b.book) : null,
+                    inlineEgress ? plugs : null, p);
             threads.add(thread("orderer-engine-" + p, () -> guarded(sh, "engine", eng::run)));
 
-            EgressPart part = new EgressPart();
-            part.p = p;
-            part.outbox = outbox.consumers().get(0);
-            part.ctx = new Egress.Ctx(p, P, sh.epoch, sh.durable.get(p));
-            if (evtW[p] != null)
-                part.plugs.add(new EvtJournal(evtW[p], b.journal.format(),
-                        new Segmenter(b.journal.dir(), b.journal.format(), Journal.Kind.Evt, p, P, b.book)));
-            for (Egress.Factory f : b.egress) part.plugs.add(f.create(part.ctx));
-            groups.get(p % nEgress).add(part);
+            if (!inlineEgress) {
+                EgressPart part = new EgressPart();
+                part.p = p;
+                part.outbox = outConsumer;
+                part.ctx = ectx;
+                part.plugs.addAll(plugs);
+                groups.get(p % nEgress).add(part);
+            }
         }
-        for (int i = 0; i < groups.size(); i++) {
-            List<EgressPart> g = groups.get(i);
-            threads.add(thread("orderer-egress-" + i, () -> guarded(sh, "egress", () -> egressLoop(sh, g, journaled))));
+        if (!inlineEgress) {
+            for (int i = 0; i < groups.size(); i++) {
+                List<EgressPart> g = groups.get(i);
+                threads.add(thread("orderer-egress-" + i, () -> guarded(sh, "egress", () -> egressLoop(sh, g, journaled))));
+            }
         }
 
         RingBuilder<CmdMsg> rb = new RingBuilder<>(b.ingressSize, CmdMsg::new);
@@ -597,6 +633,9 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         final ChunkWriter journal;
         final Journal.Format fmt;
         final Segmenter seg;
+        final List<Egress> iplugs;  // non-null: inline egress (out is null)
+        final int p;
+        final EvtMsg scratch = new EvtMsg();
         long iseq, tPub;
         boolean stop, force;
 
@@ -604,7 +643,9 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
         long nCommands, nEvents;
 
         Engine(Shared sh, Stats.EngineCounters counters, Consumer<CmdMsg> inbox, SingleProducer<EvtMsg> out, C core,
-               ChunkWriter journal, Journal.Format fmt, Segmenter seg) {
+               ChunkWriter journal, Journal.Format fmt, Segmenter seg, List<Egress> iplugs, int p) {
+            this.iplugs = iplugs;
+            this.p = p;
             this.counters = counters;
             this.sh = sh; this.inbox = inbox; this.out = out; this.core = core; this.journal = journal; this.fmt = fmt;
             this.seg = seg;
@@ -612,6 +653,12 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
 
         public void onEvent(long sym, long seq, Event ev) {
             nEvents++;
+            if (iplugs != null) {  // inline egress: no outbox, no copy, no hop
+                EvtMsg e = scratch;
+                e.iseq = iseq; e.seq = seq; e.tPub = tPub; e.arg = 0; e.symbol = sym; e.ctl = Control.None; e.ev = ev;
+                for (Egress pl : iplugs) pl.onEvent(e);
+                return;
+            }
             EvtMsg e = out.stage();
             if (e == null) throw new IllegalStateException("outbox alerted");
             e.iseq = iseq; e.seq = seq; e.tPub = tPub; e.arg = 0; e.symbol = sym; e.ctl = Control.None; e.ev = ev;
@@ -649,10 +696,22 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
                 } else {
                     force = true;
                 }
-                EvtMsg e = out.stage();
-                if (e != null) { e.iseq = m.iseq; e.seq = 0; e.tPub = 0; e.arg = m.arg; e.symbol = 0; e.ctl = m.ctl; e.ev = null; }
+                if (iplugs != null) {  // what the egress thread does for a control
+                    if (m.ctl == Control.Barrier) {
+                        for (Egress pl : iplugs) { pl.onBatchEnd(); pl.onIdle(); }
+                        sh.egressEpoch[p].set(m.arg);
+                    } else if (m.ctl == Control.Checkpoint) {
+                        for (Egress pl : iplugs) pl.onCheckpoint(m.iseq);
+                    }
+                } else {
+                    EvtMsg e = out.stage();
+                    if (e != null) { e.iseq = m.iseq; e.seq = 0; e.tPub = 0; e.arg = m.arg; e.symbol = 0; e.ctl = m.ctl; e.ev = null; }
+                }
             }
-            if (eob) out.commit();
+            if (eob) {
+                if (out != null) out.commit();
+                if (iplugs != null) for (Egress pl : iplugs) pl.onBatchEnd();
+            }
         }
 
         void run() {
@@ -661,6 +720,10 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
                 force = false;
                 int n = inbox.poll(this);
                 if (n > 0) { counters.commands = nCommands; counters.events = nEvents; }
+                if (iplugs != null) {
+                    if (stop) for (Egress pl : iplugs) { pl.onIdle(); pl.onShutdown(); }
+                    else if (n == 0) for (Egress pl : iplugs) pl.onIdle();
+                }
                 if (stop || inbox.isAlerted()) break;
                 if (journal != null && journal.pending() > 0
                         && (force || (n == 0 && System.nanoTime() - lastHandoff >= 50_000))) {
@@ -669,7 +732,7 @@ public final class Pipeline<C extends MatchingCore> implements AutoCloseable {
                 }
                 if (n == 0) inbox.idle(); else inbox.resetIdle();
             }
-            out.commit();
+            if (out != null) out.commit();
         }
     }
 

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `Pipeline.EgressPlacement` (`Builder.egressPlacement`, `Inline`; default `Thread`): the
+  engine thread runs the egress plugs itself, with no outbox ring, egress
+  thread or per-event copy. Journals must be off (`PipelineError.Kind.Config`
+  otherwise). Same events, same order (`PipelineTest`). `orderbench --egress
+  thread|inline`. Measured slower with the protocol's instrumentation on (P=2
+  17.2M -> 11.9M) and about level with it off; the default is unchanged.
 - `orderbench --latency on|off`. `off` stops stamping and sampling commands, which
   the BENCH.md protocol does with two clock reads per command; default `on`.
   Journals-off pipeline, M1: P=2 no-op core 22.7M -> 41.3M, real core P=3

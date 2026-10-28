@@ -46,6 +46,45 @@ public final class PipelineTest {
         }
     }
 
+    // ---- inline egress -------------------------------------------------------------------------
+
+    static List<List<String>> runPlaced(T.Cmds c, int P, Pipeline.EgressPlacement placement) {
+        Egress.Collect col = Egress.collect(true);
+        try (Pipeline<Core.FifoCore> p = Pipeline.builder(Core.FifoCore::new).bookConfig(CFG).partitions(P)
+                .ringSizes(1 << 10, 1 << 8, 1 << 8).egressPlacement(placement).egress(col.factory()).build()) {
+            p.publishBatch(c.symArray(), c.cmdArray());
+            p.drain();
+            p.shutdown();
+        }
+        List<List<String>> out = new ArrayList<>();
+        for (String b : col.handle().take()) out.add(T.lines(b));
+        return out;
+    }
+
+    static void inlineEgressMatchesThreadEgress() {
+        for (long seed = 1; seed <= 6; seed++) {
+            T.Cmds cmds = T.fuzzCorpus(seed, 4000, 8);
+            for (int P : new int[] {1, 2, 3, 4, 7}) {
+                List<List<String>> threaded = runPlaced(cmds, P, Pipeline.EgressPlacement.Thread);
+                List<List<String>> inlined = runPlaced(cmds, P, Pipeline.EgressPlacement.Inline);
+                check(inlined.equals(threaded), "seed ", seed, " P=", P, ": inline egress changed the streams");
+                check(T.dense(T.concat(inlined)), "seq density");
+            }
+        }
+    }
+
+    static void inlineEgressRequiresJournalsOff() {
+        Path dir = T.scratch(SCRATCH, "inline-egress-journal");
+        boolean refused = false;
+        try (var p = Pipeline.builder(Core.FifoCore::new).bookConfig(CFG).partitions(2)
+                .journal(jcfg(dir, Format.Binary)).egressPlacement(Pipeline.EgressPlacement.Inline).build()) {
+            // must not get here
+        } catch (PipelineError e) {
+            refused = e.getMessage().contains("inline egress");
+        }
+        check(refused, "inline egress with journals must be refused");
+    }
+
     static void fuzzRunsAreDeterministicPerPartition() {
         for (long seed = 1; seed <= 8; seed++) {
             T.Cmds cmds = T.fuzzCorpus(seed, 3000, 8);
@@ -551,6 +590,8 @@ public final class PipelineTest {
         T.runAll(new Object[][] {
             {"every_partition_count_matches_reference_per_symbol", (T.Body) PipelineTest::everyPartitionCountMatchesReferencePerSymbol},
             {"fuzz_runs_are_deterministic_per_partition", (T.Body) PipelineTest::fuzzRunsAreDeterministicPerPartition},
+            {"inline_egress_matches_thread_egress", (T.Body) PipelineTest::inlineEgressMatchesThreadEgress},
+            {"inline_egress_requires_journals_off", (T.Body) PipelineTest::inlineEgressRequiresJournalsOff},
             {"partition_table_routes_symbols", (T.Body) PipelineTest::partitionTableRoutesSymbols},
             {"many_producers_preserve_per_symbol_order", (T.Body) PipelineTest::manyProducersPreservePerSymbolOrder},
             {"journals_snapshot_and_recovery_round_trip", (T.Body) PipelineTest::journalsSnapshotAndRecoveryRoundTrip},
