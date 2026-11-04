@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Consensus`: the replication protocol core (`spec/REPLICATION.md`) as a pure state machine, ported from orderer-rust and proved against the shared conformance vectors (`vectors/replication/`: 28 traces, 28,000 recorded drain points, byte-identical effects and state). Only the protocol core is ported; the WAL, transport and replica runtime are not.
+
 - `Pipeline.EgressPlacement` (`Builder.egressPlacement`, `Inline`; default `Thread`): the
   engine thread runs the egress plugs itself, with no outbox ring, egress
   thread or per-event copy. Journals must be off (`PipelineError.Kind.Config`
