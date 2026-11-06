@@ -54,6 +54,22 @@ The runnable version is `src/test/java/.../Quickstart.java`.
 | Recovery | `Recover.recover(…)`, `readSnapshot`, `restore`, `Journal.repairDir` | snapshot + journals → cores at any P; torn tails repaired |
 | Checkpoints | `Pipeline.checkpoint()` | durable snapshot + journal segment rotation; old segments removed |
 
+## Replication
+
+`Consensus` is the replication protocol core (a pure state machine) and
+`io.github.abhijitkrm.orderer.cluster` the runtime around it: write-ahead log,
+snapshots, TCP transport with optional pre-shared-key authentication, a replica
+that drives the pipeline as a replicated state machine, and a leader-following
+client with exactly-once sessions and linearizable `barrier()`. `ordernode`
+runs one replica as a process, with the same command line and protocol as
+orderer-rust's `orderer-node`, orderer-cpp's `orderer_node` and orderer-go's
+`orderernode`: replicas of all four languages can share one cluster
+(`scripts/interop.sh`), and WAL and snapshot files are byte-identical.
+`ShardMap` / `ShardedClient` scale out over independent groups; `orderload` is
+the load generator and failover verifier (`run`, `status`, `settle`, `verify`);
+`clusterbench` measures throughput. Design, proofs and numbers:
+`spec/REPLICATION.md` §13.13.
+
 ## Build, test, harness
 
 ```bash

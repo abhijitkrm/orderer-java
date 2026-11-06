@@ -170,7 +170,8 @@ public final class Consensus {
             return o;
         }
 
-        private Entry entryAt(long i) {
+        /** The log entry at index i, or null if the node no longer holds it. */
+        public Entry entryAt(long i) {
             return i > base && i - base - 1 < log.size() ? log.get((int) (i - base - 1)) : null;
         }
 

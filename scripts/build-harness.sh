@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # build-harness.sh — spec/HARNESS.md §6: build the five tools and expose them
-# as harness/bin/{orderrun,ordererfuzz,orderrecover,ordersnap,orderbench}.
+# as harness/bin/{orderrun,ordererfuzz,orderrecover,ordersnap,orderbench} plus
+# ordernode, orderload, clusterbench.
 #
 #   scripts/build-harness.sh            # optimized
 #   CHECKED=1 scripts/build-harness.sh  # assertions on (-ea -esa), HARNESS.md §4.2
@@ -29,3 +30,10 @@ tool ordersnap OrderSnap "$QUICK"
 # and young generation keep collections short; OrderBench also runs System.gc()
 # before each measured pass. ParallelGC measured best here (vs G1, ZGC).
 tool orderbench OrderBench "-XX:+UseParallelGC -Xms8g -Xmx8g -Xmn2g -XX:+AlwaysPreTouch"
+# Replication runtime (spec/REPLICATION.md 13): a replica as a process, the load
+# generator / failover verifier, and the replicated-path benchmark. They keep the
+# full JIT: they are long-running.
+REPL="-XX:+UseParallelGC -Xms512m -Xmx4g"
+tool ordernode OrderNode "$REPL"
+tool orderload OrderLoad "-XX:+UseSerialGC"
+tool clusterbench ClusterBench "$REPL"

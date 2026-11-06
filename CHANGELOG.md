@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-- `Consensus`: the replication protocol core (`spec/REPLICATION.md`) as a pure state machine, ported from orderer-rust and proved against the shared conformance vectors (`vectors/replication/`: 28 traces, 28,000 recorded drain points, byte-identical effects and state). Only the protocol core is ported; the WAL, transport and replica runtime are not.
+- `Consensus`: the replication protocol core (`spec/REPLICATION.md`) as a pure state machine, ported from orderer-rust and proved against the shared conformance vectors (`vectors/replication/`: 28 traces, 28,000 recorded drain points, byte-identical effects and state). `Node.entryAt` is public.
+- `io.github.abhijitkrm.orderer.cluster`: the replication runtime, ported from the Rust, C++ and Go ones (`spec/REPLICATION.md` 13.13). WAL and snapshot store (byte-identical to Rust's, against `vectors/replication-wire/`), TCP transport with the pre-shared-key handshake and per-frame MAC, `Replica` (driver, WAL and applier threads, back-pressure, digest-based divergence halt, compaction and snapshot install), `Client`/`ClientServer` with exactly-once sessions and linearizable `barrier()`, `RecorderSm`, `DedupSm`, `PipelineSm` (the matching pipeline as the replicated state machine, same state digest as the other languages), and scale-out (`ShardMap`, `ShardedClient`; group assignment checked against independently computed values).
+- Tools `ordernode`, `orderload` (`run`, `status`, `settle`, `verify`) and `clusterbench` (same flags and output as orderer-rust's). 36 new tests (10 wire-fixture, 17 end-to-end, 3 pipeline, 6 scale-out) registered in `scripts/test.sh`; `scripts/interop.sh` runs mixed Java/Rust/C++/Go clusters under `kill -9` of the leader, with authentication and cross-language snapshot transfer.
+- `clusterbench` takes `--pmax` (default 20000): Java's price ladder holds one object per tick, about 70 MB per book at the default range, so the benchmark narrows the range to what its workload trades. Cluster nodes keep the default range (the snapshot header, and so the state digest, depend on it).
+- Vendored spec and vectors re-pinned to orderer's replication runtime commit (adds `vectors/replication-wire/`).
 
 - `Pipeline.EgressPlacement` (`Builder.egressPlacement`, `Inline`; default `Thread`): the
   engine thread runs the egress plugs itself, with no outbox ring, egress
