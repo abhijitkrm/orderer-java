@@ -60,6 +60,8 @@ public final class OrderNode {
         @Override public byte[] snapshot(long i) { return inner.snapshot(i); }
         @Override public void restore(long i, byte[] d) { inner.restore(i, d); }
         @Override public byte[] digest(long i) { return inner.digest(i); }
+        // Forwarded, not defaulted: the default would answer the state-hash request with the cheap digest.
+        @Override public byte[] deepDigest(long i) { return inner.deepDigest(i); }
     }
 
     public static void main(String[] args) throws Exception {
