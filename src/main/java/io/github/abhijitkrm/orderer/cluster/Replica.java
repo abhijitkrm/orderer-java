@@ -298,7 +298,7 @@ public final class Replica {
                         }
                         case HASH -> {
                             long at = smApplied.get();
-                            byte[] d = sm.digest(at);
+                            byte[] d = sm.deepDigest(at);
                             j.hashReply.complete(d == null ? null : new Hash(at, d));
                         }
                         case STOP -> { return; }

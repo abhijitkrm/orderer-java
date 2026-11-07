@@ -68,7 +68,7 @@ orderer-rust's `orderer-node`, orderer-cpp's `orderer_node` and orderer-go's
 `ShardMap` / `ShardedClient` scale out over independent groups; `orderload` is
 the load generator and failover verifier (`run`, `status`, `settle`, `verify`);
 `clusterbench` measures throughput. Design, proofs and numbers:
-`spec/REPLICATION.md` §13.13.
+`spec/REPLICATION.md` §13.13. Replicas detect divergence by comparing an O(partitions) digest of each partition's event stream (§13.16), not a snapshot of every book; the state hash a client asks for is still the full-state one.
 
 ## Build, test, harness
 

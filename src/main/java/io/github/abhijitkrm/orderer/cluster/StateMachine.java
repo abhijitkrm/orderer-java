@@ -21,4 +21,8 @@ public interface StateMachine {
 
     /// A digest of the state, for divergence detection; null = unsupported.
     default byte[] digest(long index) { return null; }
+
+    /// A digest of the whole state, however expensive, for on-demand checks (the client
+    /// protocol's state hash). Defaults to {@link #digest}.
+    default byte[] deepDigest(long index) { return digest(index); }
 }

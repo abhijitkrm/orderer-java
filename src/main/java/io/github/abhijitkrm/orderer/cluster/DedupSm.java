@@ -57,5 +57,11 @@ public final class DedupSm implements StateMachine {
         return RecorderSm.sha256(b.toArray());
     }
 
+    @Override public byte[] deepDigest(long index) {
+        byte[] in = inner.deepDigest(index);
+        if (in == null) return null;
+        return RecorderSm.sha256(table().bytes(in).toArray());
+    }
+
     public long duplicates() { return duplicates; }
 }
